@@ -1,0 +1,24 @@
+{
+  "datasets": {
+    "raw_input": {
+      "path": "data/raw_input.csv",
+      "encoding": "cp932",
+      "description": "配合・物性入力用の元データ"
+    },
+    "raw_inverse": {
+      "path": "data/raw_inverse.csv",
+      "encoding": "cp932",
+      "description": "逆解析用の元データ"
+    },
+    "processed_main": {
+      "path": "data/processed_main.csv",
+      "encoding": "utf-8-sig",
+      "description": "主に分析で使う加工済みデータ"
+    },
+    "processed_snapshot": {
+      "path": "data/processed_snapshot.csv",
+      "encoding": "utf-8-sig",
+      "description": "過去時点の加工済みデータ"
+    }
+  }
+}
