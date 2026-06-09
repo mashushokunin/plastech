@@ -9,14 +9,23 @@ import pandas as pd
 from plastech.data_catalog import read_dataset
 
 
+# このファイルは、Notebookから共通利用する機械学習処理をまとめたもの。
+# Notebook側は「結果を見る・考える」場所にして、前処理・評価・モデル比較の
+# 実装はここに集約する。
+
+# 最初に詳しく見る物性。S06020_060030 は「引張強さ JIS2 200mm/min」。
 DEFAULT_TARGET = "S06020_060030"
 
+# 現時点の仮の合格ライン。MAEや最大外れ誤差は、実務許容値が決まってから
+# 別途ルール化する。
 EVALUATION_RULES: dict[str, float] = {
     "random_split_r2_min": 0.75,
     "exact_composition_r2_min": 0.70,
     "primary_pvc_plus_primary_plasticizer_r2_min": 0.50,
 }
 
+# 最初にモデル化を試す候補物性。nonzero_count は「0ではない測定値がある行数」の目安。
+# 0は未測定・未入力の可能性が高いため、目標変数では基本的に除外して扱う。
 TARGET_CANDIDATES: list[dict[str, Any]] = [
     {"column": "S01010_010010", "name": "比重", "detail": "比重_23ﾟC", "nonzero_count": 5088},
     {"column": "S06020_060030", "name": "引張強さ", "detail": "JIS2 200mm/min", "nonzero_count": 3930},
@@ -30,6 +39,8 @@ TARGET_CANDIDATES: list[dict[str, Any]] = [
 
 @dataclass(frozen=True)
 class PreparedRegressionData:
+    """モデルに渡す直前の X, y と、前処理で落とした列の情報。"""
+
     X: pd.DataFrame
     y: pd.Series
     target_col: str
@@ -40,6 +51,8 @@ class PreparedRegressionData:
 
 @dataclass(frozen=True)
 class RegressionDiagnostics:
+    """1つのモデル診断に必要な評価表・予測表・重要特徴量。"""
+
     metrics: pd.DataFrame
     predictions: pd.DataFrame
     feature_importance: pd.DataFrame
@@ -48,6 +61,8 @@ class RegressionDiagnostics:
 
 @dataclass(frozen=True)
 class GroupedEvaluation:
+    """グループをまたがない評価の結果。汎化性能を見るために使う。"""
+
     metrics: pd.DataFrame
     group_summary: pd.DataFrame
     group_labels: pd.Series
@@ -56,6 +71,8 @@ class GroupedEvaluation:
 
 @dataclass(frozen=True)
 class ModelEvaluation:
+    """単一モデルを通常ランダム分割で評価した結果。"""
+
     metrics: pd.DataFrame
     predictions: pd.DataFrame
     feature_importance: pd.DataFrame
@@ -64,12 +81,12 @@ class ModelEvaluation:
 
 
 def target_candidates() -> pd.DataFrame:
-    """Return the first target candidates found during data inspection."""
+    """最初に試す目標変数候補を表として返す。"""
     return pd.DataFrame(TARGET_CANDIDATES)
 
 
 def evaluation_rules() -> pd.DataFrame:
-    """Return the current model acceptance rules."""
+    """現在の仮評価ルールを、Notebookで見やすい表として返す。"""
     return pd.DataFrame(
         [
             {
@@ -112,7 +129,7 @@ def evaluation_rules() -> pd.DataFrame:
 
 
 def column_metadata(dataset_name: str = "processed_main") -> pd.DataFrame:
-    """Return readable labels stored in the first two rows of the dataset."""
+    """processed_main の先頭2行に入っている分類名・原料名を列メタデータにする。"""
     df = read_dataset(dataset_name, nrows=2)
     rows: list[dict[str, Any]] = []
     for column in df.columns:
@@ -131,6 +148,7 @@ def column_metadata(dataset_name: str = "processed_main") -> pd.DataFrame:
 
 
 def readable_column_name(column: str, category: Any = None, label: Any = None) -> str:
+    """機械的な列名を、人間が読める「分類 / 原料名 (列名)」にする。"""
     category_text = "" if pd.isna(category) else str(category)
     label_text = "" if pd.isna(label) else str(label)
     if category_text and label_text and category_text != label_text:
@@ -149,19 +167,21 @@ def prepare_regression_data(
     drop_zero_target: bool = True,
     id_columns: tuple[str, ...] = ("Unnamed: 0",),
 ) -> PreparedRegressionData:
-    """Prepare a simple numeric regression table.
+    """回帰モデル用の X, y を作る。
 
-    The processed data keeps property columns with an ``S`` prefix. Those columns
-    are excluded from X so the model cannot use another measured property to
-    predict the target property.
+    S で始まる列は物性値なので、説明変数 X から除外する。
+    これにより、他の実測物性を使って目標物性を予測してしまう
+    データ漏洩を避ける。
     """
     df = read_dataset(dataset_name)
     if target_col not in df.columns:
         raise KeyError(f"target_col is not in {dataset_name}: {target_col}")
 
+    # 目標変数は数値化する。数値化できない値は欠損として扱う。
     target = pd.to_numeric(df[target_col], errors="coerce")
     valid_target = target.notna()
     if drop_zero_target:
+        # このデータでは、物性値の0は「本当に0」ではなく未測定の可能性が高い。
         valid_target &= target != 0
 
     feature_source = df.loc[valid_target].copy()
@@ -172,6 +192,7 @@ def prepare_regression_data(
         else pd.Series(feature_source.index.astype(str), index=feature_source.index)
     )
 
+    # 物性列とID列は説明変数から除外する。
     excluded_targets = [column for column in df.columns if column.startswith("S")]
     excluded_ids = [column for column in id_columns if column in df.columns]
     excluded = set(excluded_targets + excluded_ids)
@@ -179,13 +200,14 @@ def prepare_regression_data(
     candidate_columns = [column for column in df.columns if column not in excluded]
     X = feature_source[candidate_columns].apply(pd.to_numeric, errors="coerce")
 
+    # 学習に使えない列を落とす。全欠損列や定数列はモデルに情報を与えない。
     all_missing = X.columns[X.isna().all()].tolist()
     X = X.drop(columns=all_missing)
 
     constant_columns = X.columns[X.nunique(dropna=True) <= 1].tolist()
     X = X.drop(columns=constant_columns)
 
-    # In this data, empty material amount cells are safer to treat as absent.
+    # この配合データでは、空欄は「その原料が入っていない」とみなし、0で埋める。
     X = X.fillna(0.0).astype(float)
 
     return PreparedRegressionData(
@@ -207,7 +229,10 @@ def feature_missing_zero_summary(
     dataset_name: str = "processed_main",
     target_col: str = DEFAULT_TARGET,
 ) -> pd.DataFrame:
-    """Summarize missing and zero rates for features used in modeling."""
+    """説明変数ごとの欠損率・0率を確認する。
+
+    配合データでは0が多いのが自然だが、0が未入力を意味していないか確認するために使う。
+    """
     df = read_dataset(dataset_name)
     prepared = prepare_regression_data(dataset_name=dataset_name, target_col=target_col)
     target = pd.to_numeric(df[target_col], errors="coerce")
@@ -244,9 +269,9 @@ def important_feature_review(
     *,
     top_n: int = 30,
 ) -> pd.DataFrame:
-    """Create a domain-review table for important features.
+    """重要特徴量を材料知識でレビューしやすい表にする。
 
-    The direction columns are descriptive correlations, not causal effects.
+    相関や方向ヒントは因果関係ではない。材料知識と照合するための手がかり。
     """
     X = diagnostics.prepared.X
     y = diagnostics.prepared.y
@@ -256,6 +281,8 @@ def important_feature_review(
         column = feature["column"]
         values = X[column]
         present = values != 0
+        # 単純相関で「値が大きいと目標値が上がる/下がる」の方向を粗く見る。
+        # 木系モデルの非線形・相互作用はここでは表現しきれない。
         if values.nunique(dropna=True) > 1:
             corr = values.corr(y)
         else:
@@ -296,6 +323,7 @@ def _primary_material_label(
     metadata: pd.DataFrame,
     base_group: str,
 ) -> pd.Series:
+    """PVCや可塑剤など、指定した材料グループ内で最も配合量が多い原料名を返す。"""
     meta = metadata.set_index("column")
     columns = [
         column
@@ -324,18 +352,26 @@ def group_labels(
     *,
     dataset_name: str = "processed_main",
 ) -> pd.Series:
-    """Build grouping labels for leakage-aware evaluation."""
+    """評価用のグループラベルを作る。
+
+    同じグループが学習側と評価側にまたがらないようにし、
+    未知の配合系列への汎化性能を見る。
+    """
     metadata = column_metadata(dataset_name)
 
     if group_by == "exact_composition":
+        # Xが完全に同じ行を同じグループにする。
         labels = pd.util.hash_pandas_object(prepared.X, index=False).astype(str)
         labels.index = prepared.X.index
         return labels
     if group_by == "primary_pvc":
+        # 最も多く入っているPVC種でグループ化する。
         return _primary_material_label(prepared.X, metadata, "PVC")
     if group_by == "primary_plasticizer":
+        # 最も多く入っている可塑剤でグループ化する。
         return _primary_material_label(prepared.X, metadata, "可塑剤オイル類")
     if group_by == "primary_pvc_plus_primary_plasticizer":
+        # 実務上の配合系列に近い「主PVC + 主可塑剤」の組み合わせ。
         pvc = _primary_material_label(prepared.X, metadata, "PVC")
         plasticizer = _primary_material_label(prepared.X, metadata, "可塑剤オイル類")
         return pvc + " + " + plasticizer
@@ -356,7 +392,11 @@ def grouped_random_forest_evaluation(
     n_splits: int = 5,
     n_estimators: int = 200,
 ) -> GroupedEvaluation:
-    """Evaluate RandomForest while keeping each group on one side of the split."""
+    """RandomForestをグループ単位で評価する。
+
+    古いNotebookから使っているRandomForest専用関数。新しいモデル比較では
+    evaluate_model_grouped() を使う。
+    """
     try:
         from sklearn.ensemble import RandomForestRegressor
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -371,6 +411,7 @@ def grouped_random_forest_evaluation(
     labels = group_labels(prepared, group_by, dataset_name=dataset_name)
     group_counts = labels.value_counts()
 
+    # GroupShuffleSplit は、同じグループが train/test に分かれないように分割する。
     splitter = GroupShuffleSplit(n_splits=n_splits, test_size=test_size, random_state=random_state)
     rows: list[dict[str, Any]] = []
     for split, (train_idx, test_idx) in enumerate(
@@ -426,10 +467,14 @@ def make_regression_model(
     random_state: int = 42,
     n_estimators: int = 300,
 ) -> Any:
-    """Create a regression model by name."""
+    """モデル名から回帰モデルを作る。
+
+    Notebook側でモデルごとの細かい初期化を書かなくてよいようにする。
+    """
     if model_name == "random_forest":
         from sklearn.ensemble import RandomForestRegressor
 
+        # RandomForestは最初の安定したベースライン。スケール調整なしでも扱いやすい。
         return RandomForestRegressor(
             n_estimators=n_estimators,
             random_state=random_state,
@@ -444,6 +489,7 @@ def make_regression_model(
                 "`python3 -m pip install -r requirements.txt`."
             ) from exc
 
+        # XGBoostは、未知の主PVC+主可塑剤グループでRandomForestより良い傾向が出た候補。
         return XGBRegressor(
             n_estimators=n_estimators,
             max_depth=4,
@@ -468,7 +514,10 @@ def evaluate_model_random_split(
     random_state: int = 42,
     n_estimators: int = 300,
 ) -> ModelEvaluation:
-    """Evaluate one model with the standard random train/test split."""
+    """通常のランダム train/test 分割で1つのモデルを評価する。
+
+    似た配合が train/test に混ざる可能性があるため、補間性能を見る評価として扱う。
+    """
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.model_selection import train_test_split
 
@@ -487,6 +536,7 @@ def evaluate_model_random_split(
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
 
+    # 外れ配合を後で確認できるように、予測値・実測値・誤差を行ID付きで残す。
     predictions = pd.DataFrame(
         {
             "row_id": prepared.row_ids.loc[X_test.index].values,
@@ -498,6 +548,7 @@ def evaluate_model_random_split(
         index=y_test.index,
     ).sort_values("abs_error", ascending=False)
 
+    # MAE/RMSE/R2に加えて、実務上問題になりやすい最大外れ誤差も保存する。
     metrics = pd.DataFrame(
         [
             {
@@ -512,6 +563,7 @@ def evaluate_model_random_split(
         ]
     )
 
+    # 木系モデルの feature_importances_ を原料名付きで見られる表にする。
     metadata = column_metadata(dataset_name).set_index("column")
     if hasattr(model, "feature_importances_"):
         raw_importance = model.feature_importances_
@@ -549,7 +601,10 @@ def evaluate_model_grouped(
     n_splits: int = 5,
     n_estimators: int = 200,
 ) -> GroupedEvaluation:
-    """Evaluate one model while keeping groups out of both train and test."""
+    """グループをまたがないように1つのモデルを評価する。
+
+    通常分割より厳しく、未知のPVC系・可塑剤系などへの汎化性能を見る。
+    """
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.model_selection import GroupShuffleSplit
 
@@ -563,6 +618,7 @@ def evaluate_model_grouped(
         splitter.split(prepared.X, prepared.y, groups=labels),
         start=1,
     ):
+        # 分割ごとに新しいモデルを作り直す。前のsplitの学習結果を持ち越さないため。
         model = make_regression_model(
             model_name,
             random_state=random_state,
@@ -619,7 +675,10 @@ def compare_models_with_rules(
     grouped_n_estimators: int = 200,
     n_splits: int = 5,
 ) -> pd.DataFrame:
-    """Compare models with the fixed random and grouped evaluation rules."""
+    """固定した評価ルールで複数モデルを横並び比較する。
+
+    通常分割、完全一致配合、主PVC、主可塑剤、主PVC+主可塑剤を同じ表にまとめる。
+    """
     groupings = {
         "exact_composition": "完全一致配合",
         "primary_pvc": "主PVC種",
@@ -629,6 +688,7 @@ def compare_models_with_rules(
 
     rows: list[dict[str, Any]] = []
     for model_name in model_names:
+        # まず通常ランダム分割で、似た配合を含む補間性能を見る。
         random_eval = evaluate_model_random_split(
             model_name,
             dataset_name=dataset_name,
@@ -650,6 +710,7 @@ def compare_models_with_rules(
             }
         )
 
+        # 次にグループ評価で、未知系列への汎化性能を見る。
         for group_by, label in groupings.items():
             grouped = evaluate_model_grouped(
                 model_name,
@@ -682,7 +743,10 @@ def compare_models_with_rules(
 
 
 def add_rule_judgements(comparison: pd.DataFrame) -> pd.DataFrame:
-    """Add pass/fail labels for the fixed evaluation rules."""
+    """比較表に、固定ルールの合否を付ける。
+
+    MAEと最大外れ誤差はまだ実務閾値がないため、ここではR2系ルールだけ判定する。
+    """
     result = comparison.copy()
     result["rule_threshold"] = None
     result["rule_pass"] = None
@@ -725,6 +789,10 @@ def random_forest_diagnostics(
     random_state: int = 42,
     n_estimators: int = 300,
 ) -> RegressionDiagnostics:
+    """RandomForestの初期診断をまとめて行う。
+
+    dummy_mean と比較し、予測表・外れ配合・重要特徴量をNotebookで使いやすい形で返す。
+    """
     try:
         from sklearn.dummy import DummyRegressor
         from sklearn.ensemble import RandomForestRegressor
@@ -745,6 +813,7 @@ def random_forest_diagnostics(
     )
     row_ids_test = prepared.row_ids.loc[X_test.index]
 
+    # dummy_mean は「常に平均値を予測するだけ」の最低限の比較基準。
     models = {
         "dummy_mean": DummyRegressor(strategy="mean"),
         "random_forest": RandomForestRegressor(
@@ -769,6 +838,7 @@ def random_forest_diagnostics(
             }
         )
         if name == "random_forest":
+            # 外れが大きい順に並べ、後で配合を確認しやすくする。
             random_forest = model
             predictions = pd.DataFrame(
                 {
@@ -784,6 +854,7 @@ def random_forest_diagnostics(
     if random_forest is None or predictions is None:
         raise RuntimeError("RandomForest model was not trained.")
 
+    # 重要特徴量を、可塑剤オイル類.29 のような列名ではなく原料名付きで表示する。
     metadata = column_metadata(dataset_name).set_index("column")
     importance = pd.DataFrame(
         {
@@ -814,7 +885,11 @@ def run_baseline_models(
     n_estimators: int = 300,
     include_ridge: bool = False,
 ) -> tuple[pd.DataFrame, PreparedRegressionData, dict[str, Any]]:
-    """Train baseline regression models and return their test metrics."""
+    """ベースラインモデルをまとめて学習する。
+
+    train_baseline.py から使うための簡易関数。通常は random_forest_diagnostics() や
+    evaluate_model_random_split() を使う。
+    """
     try:
         from sklearn.dummy import DummyRegressor
         from sklearn.ensemble import RandomForestRegressor
@@ -837,6 +912,7 @@ def run_baseline_models(
         random_state=random_state,
     )
 
+    # Ridgeは任意。特徴量が多く相関も強いため、警告が出る場合がある。
     models = {
         "dummy_mean": DummyRegressor(strategy="mean"),
         "random_forest": RandomForestRegressor(
