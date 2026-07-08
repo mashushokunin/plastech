@@ -502,7 +502,33 @@ def make_regression_model(
             n_jobs=-1,
         )
 
-    raise ValueError("model_name must be one of: random_forest, xgboost")
+    if model_name == "lightgbm":
+        try:
+            from lightgbm import LGBMRegressor
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "lightgbm is required. Install dependencies with "
+                "`python3 -m pip install -r requirements.txt`."
+            ) from exc
+
+        # 疎な配合データ向けの初期設定。最終的な採用可否は、Notebookで
+        # ランダム分割と材料系列を分けた評価の両方で確認する。
+        return LGBMRegressor(
+            objective="regression",
+            n_estimators=n_estimators,
+            learning_rate=0.03,
+            num_leaves=31,
+            min_child_samples=20,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_lambda=1.0,
+            random_state=random_state,
+            # 交差検証では複数モデルを続けて学習するため、プロセス数を抑える。
+            n_jobs=1,
+            verbosity=-1,
+        )
+
+    raise ValueError("model_name must be one of: random_forest, xgboost, lightgbm")
 
 
 def evaluate_model_random_split(
