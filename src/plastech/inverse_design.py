@@ -62,6 +62,100 @@ class ForwardModelSet:
     prepared: dict[str, PreparedRegressionData]
 
 
+@dataclass(frozen=True)
+class DesignBrief:
+    """用途イメージと、その用途で見る物性目標の組み合わせ。"""
+
+    name: str
+    description: str
+    preferences: tuple[TargetSpecification, ...]
+
+    @property
+    def main_goal(self) -> TargetSpecification:
+        if not self.preferences:
+            raise ValueError("DesignBrief.preferences must not be empty.")
+        return self.preferences[0]
+
+
+@dataclass(frozen=True)
+class InverseDesignResult:
+    """1つの材料像に対する逆解析結果一式。"""
+
+    brief: DesignBrief
+    forward_models: ForwardModelSet
+    library: pd.DataFrame
+    seed_ranking: pd.DataFrame
+    virtual_candidates: pd.DataFrame
+    scored_candidates: pd.DataFrame
+    pareto_candidates: pd.DataFrame
+    recommended_candidates: pd.DataFrame
+
+
+DEFAULT_DESIGN_BRIEFS: dict[str, DesignBrief] = {
+    "柔軟・低温用途": DesignBrief(
+        name="柔軟・低温用途",
+        description="柔らかく、低温で脆くなりにくい材料を狙う。",
+        preferences=(
+            TargetSpecification("S03010_030010", "硬度 HDA (0s)", 70.0, 4.0, weight=1.4),
+            TargetSpecification(
+                "S06060_060030",
+                "引張伸び (JIS2 200mm/min)",
+                370.0,
+                40.0,
+                objective="lower_bound",
+            ),
+            TargetSpecification(
+                "S13010_130010",
+                "脆化温度 (JIS K6723)",
+                -41.0,
+                4.0,
+                objective="upper_bound",
+            ),
+            TargetSpecification("S01010_010010", "比重 (23℃)", 1.34, 0.06, weight=0.5),
+        ),
+    ),
+    "硬さ・剛性用途": DesignBrief(
+        name="硬さ・剛性用途",
+        description="硬度と剛性を優先する材料を狙う。",
+        preferences=(
+            TargetSpecification("S03010_030010", "硬度 HDA (0s)", 89.0, 3.0, weight=1.4),
+            TargetSpecification(
+                "S06010_060030",
+                "100%モジュラス (JIS2 200mm/min)",
+                11.0,
+                2.0,
+                objective="lower_bound",
+            ),
+            TargetSpecification(
+                "S06020_060030",
+                "引張強さ (JIS2 200mm/min)",
+                20.0,
+                3.0,
+                objective="lower_bound",
+                weight=0.8,
+            ),
+            TargetSpecification("S01010_010010", "比重 (23℃)", 1.38, 0.06, weight=0.4),
+        ),
+    ),
+    "バランス型軟質PVC": DesignBrief(
+        name="バランス型軟質PVC",
+        description="硬度、剛性、低温特性、比重のバランスを狙う。",
+        preferences=(
+            TargetSpecification("S03010_030010", "硬度 HDA (0s)", 78.0, 3.0, weight=1.3),
+            TargetSpecification("S06010_060030", "100%モジュラス (JIS2 200mm/min)", 7.5, 1.5),
+            TargetSpecification(
+                "S13010_130010",
+                "脆化温度 (JIS K6723)",
+                -33.0,
+                3.0,
+                objective="upper_bound",
+            ),
+            TargetSpecification("S01010_010010", "比重 (23℃)", 1.34, 0.05, weight=0.5),
+        ),
+    ),
+}
+
+
 def specifications_frame(
     specifications: Sequence[TargetSpecification] = DEFAULT_INVERSE_TARGETS,
 ) -> pd.DataFrame:
@@ -279,6 +373,21 @@ def rank_historical_candidates(
     return scored.sort_values(["observed_score", "predicted_score"], kind="stable").reset_index(drop=True)
 
 
+def rank_seed_candidates(
+    library: pd.DataFrame,
+    main_goal: TargetSpecification,
+) -> pd.DataFrame:
+    """主目標の実測値が近い過去配合を、仮想候補生成の起点として並べる。"""
+    observed_col = f"observed__{main_goal.column}"
+    if observed_col not in library:
+        raise KeyError(f"{observed_col} is required in library.")
+
+    result = library.copy()
+    observed = pd.to_numeric(result[observed_col], errors="coerce")
+    result["main_goal_error"] = objective_error(observed, main_goal)
+    return result.sort_values("main_goal_error", kind="stable").reset_index(drop=True)
+
+
 def generate_interpolated_candidates(
     library: pd.DataFrame,
     historical_ranking: pd.DataFrame,
@@ -344,6 +453,135 @@ def generate_interpolated_candidates(
     return add_predictions_and_scores(pd.DataFrame(records), forward_models).sort_values(
         "predicted_score", kind="stable"
     ).reset_index(drop=True)
+
+
+def objective_error(values: pd.Series, specification: TargetSpecification) -> pd.Series:
+    """目標からの無次元誤差を返す。小さいほど好ましい。"""
+    return _objective_error(values, specification)
+
+
+def pareto_optimal_mask(error_matrix: np.ndarray) -> np.ndarray:
+    """小さいほど良い誤差行列に対し、他候補に支配されない行だけを残す。"""
+    errors = np.asarray(error_matrix, dtype=float)
+    if errors.ndim != 2:
+        raise ValueError("error_matrix must be a 2D array.")
+
+    mask = np.ones(len(errors), dtype=bool)
+    for index, error in enumerate(errors):
+        dominates_index = np.all(errors <= error, axis=1) & np.any(errors < error, axis=1)
+        if dominates_index.any():
+            mask[index] = False
+    return mask
+
+
+def score_design_preferences(
+    candidates: pd.DataFrame,
+    preferences: Sequence[TargetSpecification],
+    *,
+    value_prefix: str = "predicted",
+) -> pd.DataFrame:
+    """用途別の主目標・副目標で候補を採点し、Pareto判定も追加する。"""
+    specs = tuple(preferences)
+    if not specs:
+        raise ValueError("preferences must not be empty.")
+
+    result = candidates.copy()
+    error_columns: list[str] = []
+    for specification in specs:
+        value_col = f"{value_prefix}__{specification.column}"
+        if value_col not in result:
+            raise KeyError(f"{value_col} is required in candidates.")
+        error_col = f"preference_error__{specification.column}"
+        result[error_col] = objective_error(
+            pd.to_numeric(result[value_col], errors="coerce"),
+            specification,
+        )
+        error_columns.append(error_col)
+
+    total_weight = sum(spec.weight for spec in specs)
+    weighted_error = sum(spec.weight * result[f"preference_error__{spec.column}"] for spec in specs)
+    result["design_score"] = weighted_error / total_weight
+    result["pareto_optimal"] = pareto_optimal_mask(result[error_columns].to_numpy())
+    return result.sort_values("design_score", kind="stable").reset_index(drop=True)
+
+
+def select_diverse_candidates(
+    candidates: pd.DataFrame,
+    *,
+    top_n: int = 5,
+    prefer_pareto: bool = True,
+) -> pd.DataFrame:
+    """材料系列が重複しすぎないように、上位候補から実験候補を選ぶ。"""
+    if top_n <= 0:
+        raise ValueError("top_n must be positive.")
+    required = {"primary_pvc", "primary_plasticizer", "design_score"}
+    missing = required - set(candidates.columns)
+    if missing:
+        raise KeyError(f"candidates is missing required columns: {sorted(missing)}")
+
+    source = candidates
+    if prefer_pareto and "pareto_optimal" in candidates:
+        pareto = candidates[candidates["pareto_optimal"]].copy()
+        if not pareto.empty:
+            source = pareto
+
+    result = source.copy()
+    result["material_series"] = result["primary_pvc"] + " | " + result["primary_plasticizer"]
+    diverse = result.sort_values("design_score", kind="stable").drop_duplicates("material_series")
+    if len(diverse) < top_n:
+        fallback = result.sort_values("design_score", kind="stable")
+        diverse = pd.concat([diverse, fallback], ignore_index=True).drop_duplicates("row_id")
+    return diverse.head(top_n).reset_index(drop=True)
+
+
+def run_inverse_design_for_brief(
+    brief: DesignBrief,
+    *,
+    dataset_name: str = "processed_main",
+    model_name: str = "lightgbm",
+    n_estimators: int = 800,
+    seed_count: int = 30,
+    partners_per_seed: int = 5,
+    fractions: tuple[float, ...] = (0.25, 0.5, 0.75),
+    top_n: int = 5,
+    random_state: int = 42,
+) -> InverseDesignResult:
+    """材料像から順解析モデル学習、候補生成、Pareto候補選定まで一括実行する。"""
+    forward_models = fit_forward_models(
+        brief.preferences,
+        dataset_name=dataset_name,
+        model_name=model_name,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
+    library = build_candidate_library(forward_models, dataset_name=dataset_name)
+    seed_ranking = rank_seed_candidates(library, brief.main_goal)
+    virtual_candidates = generate_interpolated_candidates(
+        library,
+        seed_ranking,
+        forward_models,
+        seed_count=seed_count,
+        partners_per_seed=partners_per_seed,
+        fractions=fractions,
+        random_state=random_state,
+    )
+    scored_candidates = score_design_preferences(virtual_candidates, brief.preferences)
+    pareto_candidates = scored_candidates[scored_candidates["pareto_optimal"]].copy()
+    recommended_candidates = select_diverse_candidates(
+        scored_candidates,
+        top_n=top_n,
+        prefer_pareto=True,
+    )
+    return InverseDesignResult(
+        brief=brief,
+        forward_models=forward_models,
+        library=library,
+        seed_ranking=seed_ranking,
+        virtual_candidates=virtual_candidates,
+        scored_candidates=scored_candidates,
+        pareto_candidates=pareto_candidates.reset_index(drop=True),
+        recommended_candidates=recommended_candidates,
+    )
 
 
 def candidate_summary(
