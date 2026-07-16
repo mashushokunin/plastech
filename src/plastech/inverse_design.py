@@ -314,6 +314,17 @@ def _objective_pass(values: pd.Series, spec: TargetSpecification) -> pd.Series:
     raise ValueError(f"Unknown objective: {spec.objective}")
 
 
+def _objective_margin(values: pd.Series, spec: TargetSpecification) -> pd.Series:
+    """仕様境界までの余裕を物性単位で返す。正なら合格、負なら未達。"""
+    if spec.objective == "target":
+        return spec.tolerance - (values - spec.target).abs()
+    if spec.objective == "lower_bound":
+        return values - spec.target
+    if spec.objective == "upper_bound":
+        return spec.target - values
+    raise ValueError(f"Unknown objective: {spec.objective}")
+
+
 def add_predictions_and_scores(
     candidates: pd.DataFrame,
     forward_models: ForwardModelSet,
@@ -505,6 +516,40 @@ def score_design_preferences(
     return result.sort_values("design_score", kind="stable").reset_index(drop=True)
 
 
+def add_preference_status(
+    candidates: pd.DataFrame,
+    preferences: Sequence[TargetSpecification],
+    *,
+    value_prefix: str = "predicted",
+) -> pd.DataFrame:
+    """候補ごとに、用途仕様の合否・未達物性・境界余裕を追加する。"""
+    specs = tuple(preferences)
+    if not specs:
+        raise ValueError("preferences must not be empty.")
+
+    result = candidates.copy()
+    pass_columns: list[str] = []
+    for spec in specs:
+        value_col = f"{value_prefix}__{spec.column}"
+        if value_col not in result:
+            raise KeyError(f"{value_col} is required in candidates.")
+        values = pd.to_numeric(result[value_col], errors="coerce")
+        pass_col = f"{value_prefix}_meets__{spec.column}"
+        margin_col = f"{value_prefix}_margin__{spec.column}"
+        result[pass_col] = _objective_pass(values, spec).fillna(False)
+        result[margin_col] = _objective_margin(values, spec)
+        pass_columns.append(pass_col)
+
+    result[f"{value_prefix}_meets_preferences"] = result[pass_columns].all(axis=1)
+
+    def unmet(row: pd.Series) -> str:
+        names = [spec.name for spec, column in zip(specs, pass_columns) if not bool(row[column])]
+        return ", ".join(names)
+
+    result[f"{value_prefix}_unmet_preferences"] = result.apply(unmet, axis=1)
+    return result
+
+
 def select_diverse_candidates(
     candidates: pd.DataFrame,
     *,
@@ -532,6 +577,135 @@ def select_diverse_candidates(
         fallback = result.sort_values("design_score", kind="stable")
         diverse = pd.concat([diverse, fallback], ignore_index=True).drop_duplicates("row_id")
     return diverse.head(top_n).reset_index(drop=True)
+
+
+def _candidate_metadata_columns() -> set[str]:
+    return {
+        "row_id",
+        "candidate_type",
+        "parent_a",
+        "parent_b",
+        "parent_a_fraction",
+        "primary_pvc",
+        "primary_plasticizer",
+        "main_goal_error",
+        "observed_score",
+        "observed_meets_all",
+        "predicted_score",
+        "predicted_meets_all",
+        "design_score",
+        "pareto_optimal",
+        "material_series",
+        "predicted_meets_preferences",
+        "predicted_unmet_preferences",
+        "observed_meets_preferences",
+        "observed_unmet_preferences",
+    }
+
+
+def _infer_formulation_columns(
+    candidates: pd.DataFrame,
+    library: pd.DataFrame,
+) -> list[str]:
+    metadata_columns = _candidate_metadata_columns()
+    columns: list[str] = []
+    for column in candidates.columns:
+        if column not in library.columns:
+            continue
+        if column in metadata_columns or any(
+            column.startswith(prefix)
+            for prefix in (
+                "observed__",
+                "predicted__",
+                "prediction_error__",
+                "observed_error__",
+                "preference_error__",
+                "predicted_meets__",
+                "predicted_margin__",
+                "observed_meets__",
+                "observed_margin__",
+            )
+        ):
+            continue
+        if pd.api.types.is_numeric_dtype(pd.to_numeric(library[column], errors="coerce")):
+            columns.append(column)
+    return columns
+
+
+def parent_formulation_deltas(
+    candidates: pd.DataFrame,
+    library: pd.DataFrame,
+    *,
+    feature_columns: Sequence[str] | None = None,
+    top_n_per_candidate: int = 30,
+    min_abs_delta: float = 1e-9,
+    dataset_name: str = "processed_main",
+) -> pd.DataFrame:
+    """推薦候補と親配合A/Bの配合差分を、原料別の縦持ち表で返す。"""
+    if top_n_per_candidate <= 0:
+        raise ValueError("top_n_per_candidate must be positive.")
+    required = {"row_id", "parent_a", "parent_b"}
+    missing = required - set(candidates.columns)
+    if missing:
+        raise KeyError(f"candidates is missing required columns: {sorted(missing)}")
+    if "row_id" not in library:
+        raise KeyError("library is missing required column: row_id")
+
+    columns = list(feature_columns) if feature_columns is not None else _infer_formulation_columns(candidates, library)
+    metadata = column_metadata(dataset_name).set_index("column")
+    library_by_id = library.set_index("row_id", drop=False)
+    rows: list[dict[str, Any]] = []
+
+    for rank, (_, candidate) in enumerate(candidates.reset_index(drop=True).iterrows(), start=1):
+        parent_a_id = candidate["parent_a"]
+        parent_b_id = candidate["parent_b"]
+        if parent_a_id not in library_by_id.index or parent_b_id not in library_by_id.index:
+            continue
+
+        parent_a = library_by_id.loc[parent_a_id]
+        parent_b = library_by_id.loc[parent_b_id]
+        candidate_values = pd.to_numeric(candidate.reindex(columns), errors="coerce").fillna(0.0)
+        parent_a_values = pd.to_numeric(parent_a.reindex(columns), errors="coerce").fillna(0.0)
+        parent_b_values = pd.to_numeric(parent_b.reindex(columns), errors="coerce").fillna(0.0)
+
+        deltas = pd.DataFrame(
+            {
+                "column": columns,
+                "candidate_amount": candidate_values.to_numpy(dtype=float),
+                "parent_a_amount": parent_a_values.to_numpy(dtype=float),
+                "parent_b_amount": parent_b_values.to_numpy(dtype=float),
+            }
+        )
+        deltas["delta_from_parent_a"] = deltas["candidate_amount"] - deltas["parent_a_amount"]
+        deltas["delta_from_parent_b"] = deltas["candidate_amount"] - deltas["parent_b_amount"]
+        deltas["max_abs_delta"] = deltas[["delta_from_parent_a", "delta_from_parent_b"]].abs().max(axis=1)
+        deltas = deltas[deltas["max_abs_delta"] > min_abs_delta]
+        deltas = deltas.sort_values("max_abs_delta", ascending=False).head(top_n_per_candidate)
+
+        for _, delta in deltas.iterrows():
+            column = delta["column"]
+            meta = metadata.loc[column] if column in metadata.index else {}
+            rows.append(
+                {
+                    "candidate_rank": rank,
+                    "candidate_row_id": candidate["row_id"],
+                    "parent_a": parent_a_id,
+                    "parent_b": parent_b_id,
+                    "parent_a_fraction": candidate.get("parent_a_fraction"),
+                    "column": column,
+                    "base_group": meta.get("base_group") if hasattr(meta, "get") else None,
+                    "category": meta.get("category") if hasattr(meta, "get") else None,
+                    "label": meta.get("label") if hasattr(meta, "get") else None,
+                    "display_name": meta.get("display_name") if hasattr(meta, "get") else column,
+                    "candidate_amount": delta["candidate_amount"],
+                    "parent_a_amount": delta["parent_a_amount"],
+                    "parent_b_amount": delta["parent_b_amount"],
+                    "delta_from_parent_a": delta["delta_from_parent_a"],
+                    "delta_from_parent_b": delta["delta_from_parent_b"],
+                }
+            )
+
+    return pd.DataFrame(rows)
 
 
 def run_inverse_design_for_brief(
@@ -572,6 +746,7 @@ def run_inverse_design_for_brief(
         top_n=top_n,
         prefer_pareto=True,
     )
+    recommended_candidates = add_preference_status(recommended_candidates, brief.preferences)
     return InverseDesignResult(
         brief=brief,
         forward_models=forward_models,
@@ -605,6 +780,10 @@ def candidate_summary(
             "observed_meets_all",
             "predicted_score",
             "predicted_meets_all",
+            "design_score",
+            "pareto_optimal",
+            "predicted_meets_preferences",
+            "predicted_unmet_preferences",
         )
         if column in candidates
     ]

@@ -14,6 +14,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "plastec
 from plastech.inverse_design import (  # noqa: E402
     DEFAULT_DESIGN_BRIEFS,
     candidate_summary,
+    parent_formulation_deltas,
     run_inverse_design_for_brief,
     specifications_frame,
 )
@@ -76,6 +77,11 @@ def main() -> None:
         print(f"recommended candidates: {len(result.recommended_candidates):,}")
         print()
         print(candidate_summary(result.recommended_candidates, result.forward_models, top_n=args.top_n).to_string(index=False))
+        if "predicted_unmet_preferences" in result.recommended_candidates:
+            unmet = result.recommended_candidates[["row_id", "predicted_meets_preferences", "predicted_unmet_preferences"]]
+            print()
+            print("preference status:")
+            print(unmet.to_string(index=False))
         print()
 
         if args.output_dir is not None:
@@ -83,6 +89,22 @@ def main() -> None:
             output_path = args.output_dir / f"{safe_name}_recommended_candidates.csv"
             result.recommended_candidates.to_csv(output_path, index=False, encoding="utf-8-sig")
             print(f"wrote: {output_path}")
+
+            summary_path = args.output_dir / f"{safe_name}_candidate_summary.csv"
+            candidate_summary(result.recommended_candidates, result.forward_models, top_n=args.top_n).to_csv(
+                summary_path,
+                index=False,
+                encoding="utf-8-sig",
+            )
+            print(f"wrote: {summary_path}")
+
+            delta_path = args.output_dir / f"{safe_name}_parent_formulation_deltas.csv"
+            parent_formulation_deltas(
+                result.recommended_candidates,
+                result.library,
+                dataset_name=args.dataset,
+            ).to_csv(delta_path, index=False, encoding="utf-8-sig")
+            print(f"wrote: {delta_path}")
 
 
 if __name__ == "__main__":
