@@ -370,7 +370,7 @@ def select_experiment_profiles(candidates: pd.DataFrame, top_n: int = 5) -> pd.D
             [True, True, True],
         ),
     )
-    return pd.concat(
+    result = pd.concat(
         [
             _select_profile(
                 eligible,
@@ -383,6 +383,12 @@ def select_experiment_profiles(candidates: pd.DataFrame, top_n: int = 5) -> pd.D
         ],
         ignore_index=True,
     )
+    labels = {
+        row_id: f"候補{number:02d}"
+        for number, row_id in enumerate(result["row_id"].drop_duplicates(), start=1)
+    }
+    result.insert(3, "candidate_label", result["row_id"].map(labels))
+    return result
 
 
 def candidate_review_sheet(experiment_slate: pd.DataFrame) -> pd.DataFrame:
@@ -393,6 +399,7 @@ def candidate_review_sheet(experiment_slate: pd.DataFrame) -> pd.DataFrame:
         "selection_profile",
         "profile_rank",
         "selection_reason",
+        "candidate_label",
         "row_id",
         "parent_a",
         "parent_b",
@@ -441,6 +448,7 @@ def readable_experiment_slate(experiment_slate: pd.DataFrame) -> pd.DataFrame:
         "selection_profile",
         "profile_rank",
         "selection_reason",
+        "candidate_label",
         "row_id",
         "parent_a",
         "parent_b",
