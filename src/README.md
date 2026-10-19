@@ -171,10 +171,22 @@ python3 scripts/train_baseline.py
 - `generate_interpolated_candidates()`
 - `score_design_preferences()`
 - `add_preference_status()`
+- `add_design_brief_status()`
+- `add_formulation_material_count()`
 - `select_diverse_candidates()`
 - `parent_formulation_deltas()`
 - `run_inverse_design_for_brief()`
 - `candidate_summary()`
+
+`DesignBrief`は物性を次の役割に分けられる。
+
+- `preferences` / `objectives`: 候補順位とPareto判定に使用
+- `management_targets`: 狙い範囲を満たす候補を優先
+- `constraints`: 最低条件を満たす候補を優先
+- `monitors`: 予測と表示のみ。順位・Pareto・必要条件には不使用
+
+既存の4物性一括方式は`DEFAULT_DESIGN_BRIEFS`、役割分離方式は
+`ROLE_BASED_DESIGN_BRIEFS`に分けてあり、新旧比較を再現できる。
 
 関連スクリプト:
 

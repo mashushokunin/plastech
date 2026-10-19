@@ -66,3 +66,28 @@ df = read_dataset("raw_input")
 - pandasのインストール
 - CSVファイルの読み込み
 - df.head(), df.shape, df.info(), df.describe() による初期確認
+
+## 逆解析の再実行
+
+従来の4物性一括方式と、物性を最適化・管理目標・制約・監視に分けた方式を比較する。
+
+```bash
+python3 scripts/analyze_role_based_design.py
+```
+
+柔軟・低温用途について、役割分離、暫定10材料以下、主PVC・主可塑剤を特定可能という条件で候補を出す。
+
+```bash
+python3 scripts/run_inverse_design.py \
+  --design-mode role_based \
+  --concept "柔軟・低温用途" \
+  --max-material-count 10 \
+  --require-identified-primary-materials \
+  --output-dir outputs/role_based_cli
+```
+
+自動テストは次のコマンドで実行する。
+
+```bash
+python3 -m unittest discover -s tests -v
+```

@@ -15,7 +15,7 @@ from plastech.modeling import (
 )
 
 
-Objective = Literal["target", "lower_bound", "upper_bound"]
+Objective = Literal["target", "lower_bound", "upper_bound", "minimize", "maximize"]
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,10 @@ class TargetSpecification:
     weight: float = 1.0
 
     def description(self) -> str:
+        if self.objective == "minimize":
+            return f"minimize (reference <= {self.target:g})"
+        if self.objective == "maximize":
+            return f"maximize (reference >= {self.target:g})"
         if self.objective == "lower_bound":
             return f">= {self.target:g}"
         if self.objective == "upper_bound":
@@ -64,17 +68,49 @@ class ForwardModelSet:
 
 @dataclass(frozen=True)
 class DesignBrief:
-    """用途イメージと、その用途で見る物性目標の組み合わせ。"""
+    """用途イメージと、用途内で役割分けした物性目標の組み合わせ。
+
+    ``preferences`` は既存Notebookとの互換性のため名称を維持しているが、
+    新しい設計では候補順位とPareto判定に使う「最適化物性」を表す。
+    管理目標と制約は候補選定時の優先条件、監視物性は予測・表示だけに使う。
+    """
 
     name: str
     description: str
     preferences: tuple[TargetSpecification, ...]
+    management_targets: tuple[TargetSpecification, ...] = ()
+    constraints: tuple[TargetSpecification, ...] = ()
+    monitors: tuple[TargetSpecification, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.preferences:
+            raise ValueError("DesignBrief.preferences must not be empty.")
+        columns = [spec.column for spec in self.all_specifications]
+        duplicates = sorted({column for column in columns if columns.count(column) > 1})
+        if duplicates:
+            raise ValueError(
+                "A property must have only one role in a DesignBrief: "
+                f"{duplicates}"
+            )
+
+    @property
+    def objectives(self) -> tuple[TargetSpecification, ...]:
+        """候補順位とPareto判定に使う最適化物性。"""
+        return self.preferences
+
+    @property
+    def required_specifications(self) -> tuple[TargetSpecification, ...]:
+        """探索ライブラリと候補優先順位に使う必須測定物性。"""
+        return self.objectives + self.management_targets + self.constraints
+
+    @property
+    def all_specifications(self) -> tuple[TargetSpecification, ...]:
+        """予測する全物性。監視物性も含む。"""
+        return self.required_specifications + self.monitors
 
     @property
     def main_goal(self) -> TargetSpecification:
-        if not self.preferences:
-            raise ValueError("DesignBrief.preferences must not be empty.")
-        return self.preferences[0]
+        return self.objectives[0]
 
 
 @dataclass(frozen=True)
@@ -156,6 +192,58 @@ DEFAULT_DESIGN_BRIEFS: dict[str, DesignBrief] = {
 }
 
 
+# 2026-08の物性数比較を受けて導入した役割分離版。
+# 既存の4物性方式は DEFAULT_DESIGN_BRIEFS に残し、新旧比較を可能にする。
+ROLE_BASED_DESIGN_BRIEFS: dict[str, DesignBrief] = {
+    "柔軟・低温用途": DesignBrief(
+        name="柔軟・低温用途（役割分離）",
+        description=(
+            "脆化温度を最適化し、硬度と引張伸びを必要条件として確認する。"
+            "比重、100%モジュラス、引張強さは初期順位を変えずに監視する。"
+        ),
+        preferences=(
+            TargetSpecification(
+                "S13010_130010",
+                "脆化温度 (JIS K6723)",
+                -41.0,
+                4.0,
+                objective="minimize",
+            ),
+        ),
+        management_targets=(
+            TargetSpecification("S03010_030010", "硬度 HDA (0s)", 70.0, 4.0),
+        ),
+        constraints=(
+            TargetSpecification(
+                "S06060_060030",
+                "引張伸び (JIS2 200mm/min)",
+                370.0,
+                40.0,
+                objective="lower_bound",
+            ),
+        ),
+        monitors=(
+            # 監視物性の目標値は前回の探索条件を参考値として保持するが、
+            # 候補順位・Pareto判定・必要条件の合否には使わない。
+            TargetSpecification("S01010_010010", "比重 (23℃)", 1.34, 0.06),
+            TargetSpecification(
+                "S06010_060030",
+                "100%モジュラス (JIS2 200mm/min)",
+                7.5,
+                1.5,
+            ),
+            TargetSpecification(
+                "S06020_060030",
+                "引張強さ (JIS2 200mm/min)",
+                20.0,
+                3.0,
+                objective="lower_bound",
+            ),
+        ),
+    ),
+}
+
+
 def specifications_frame(
     specifications: Sequence[TargetSpecification] = DEFAULT_INVERSE_TARGETS,
 ) -> pd.DataFrame:
@@ -171,6 +259,25 @@ def specifications_frame(
             "requirement": [spec.description() for spec in specifications],
         }
     )
+
+
+def brief_specifications_frame(brief: DesignBrief) -> pd.DataFrame:
+    """用途内の物性役割と探索条件を表示用の表にする。"""
+    frames: list[pd.DataFrame] = []
+    for role, specifications in (
+        ("objective", brief.objectives),
+        ("management_target", brief.management_targets),
+        ("constraint", brief.constraints),
+        ("monitor", brief.monitors),
+    ):
+        if not specifications:
+            continue
+        frame = specifications_frame(specifications)
+        frame.insert(0, "role", role)
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def fit_forward_models(
@@ -240,6 +347,7 @@ def build_candidate_library(
     *,
     dataset_name: str = "processed_main",
     require_all_observed: bool = True,
+    required_observed: Sequence[TargetSpecification] | None = None,
 ) -> pd.DataFrame:
     """探索の起点となる既存配合ライブラリを作る。
 
@@ -263,11 +371,27 @@ def build_candidate_library(
     # 先頭2行は原料・物性の説明行であり、配合データではない。
     is_data_row = source[id_column].notna()
     valid_mask = is_data_row.copy()
+    required_columns = {
+        spec.column
+        for spec in (
+            tuple(required_observed)
+            if required_observed is not None
+            else forward_models.specifications
+        )
+    }
+    available_columns = {spec.column for spec in forward_models.specifications}
+    missing_required = required_columns - available_columns
+    if missing_required:
+        raise ValueError(
+            "required_observed contains properties without a fitted model: "
+            f"{sorted(missing_required)}"
+        )
+
     observed: dict[str, pd.Series] = {}
     for spec in forward_models.specifications:
         values = pd.to_numeric(source[spec.column], errors="coerce")
         observed[spec.column] = values
-        if require_all_observed:
+        if require_all_observed and spec.column in required_columns:
             valid_mask &= values.notna() & values.ne(0)
 
     metadata = column_metadata(dataset_name)
@@ -300,17 +424,27 @@ def _objective_error(values: pd.Series, spec: TargetSpecification) -> pd.Series:
         return (spec.target - values).clip(lower=0) / spec.tolerance
     if spec.objective == "upper_bound":
         return (values - spec.target).clip(lower=0) / spec.tolerance
+    if spec.objective == "minimize":
+        return (values - spec.target) / spec.tolerance
+    if spec.objective == "maximize":
+        return (spec.target - values) / spec.tolerance
     raise ValueError(f"Unknown objective: {spec.objective}")
 
 
 def _objective_pass(values: pd.Series, spec: TargetSpecification) -> pd.Series:
     """仕様を満たすかを判定する。境界条件は予測誤差幅で緩和しない。"""
     if spec.objective == "target":
-        return (values - spec.target).abs().le(spec.tolerance)
+        # 1.34 - 0.05 のような十進小数の境界が、二進浮動小数点の丸めで
+        # 0.050000000000000044 となり不合格になることだけを防ぐ。
+        return (values - spec.target).abs().le(spec.tolerance + 1e-12)
     if spec.objective == "lower_bound":
         return values.ge(spec.target)
     if spec.objective == "upper_bound":
         return values.le(spec.target)
+    if spec.objective == "minimize":
+        return values.le(spec.target)
+    if spec.objective == "maximize":
+        return values.ge(spec.target)
     raise ValueError(f"Unknown objective: {spec.objective}")
 
 
@@ -322,18 +456,28 @@ def _objective_margin(values: pd.Series, spec: TargetSpecification) -> pd.Series
         return values - spec.target
     if spec.objective == "upper_bound":
         return spec.target - values
+    if spec.objective == "minimize":
+        return spec.target - values
+    if spec.objective == "maximize":
+        return values - spec.target
     raise ValueError(f"Unknown objective: {spec.objective}")
 
 
 def add_predictions_and_scores(
     candidates: pd.DataFrame,
     forward_models: ForwardModelSet,
+    *,
+    scoring_specifications: Sequence[TargetSpecification] | None = None,
 ) -> pd.DataFrame:
     """候補に順解析予測と、実測・予測それぞれの目標スコアを追加する。"""
     result = candidates.copy()
     weighted_prediction_error = pd.Series(0.0, index=result.index)
     weighted_observed_error = pd.Series(0.0, index=result.index)
-    total_weight = sum(spec.weight for spec in forward_models.specifications)
+    scoring_specs = tuple(scoring_specifications or forward_models.specifications)
+    scoring_by_column = {spec.column: spec for spec in scoring_specs}
+    total_weight = sum(spec.weight for spec in scoring_specs)
+    if total_weight <= 0:
+        raise ValueError("The total scoring weight must be positive.")
 
     for spec in forward_models.specifications:
         prepared = forward_models.prepared[spec.column]
@@ -342,32 +486,35 @@ def add_predictions_and_scores(
         prediction = pd.Series(forward_models.models[spec.column].predict(X), index=result.index)
         predicted_col = f"predicted__{spec.column}"
         result[predicted_col] = prediction
-        prediction_error = _objective_error(prediction, spec)
+        score_spec = scoring_by_column.get(spec.column)
+        prediction_error = _objective_error(prediction, score_spec or spec)
         result[f"prediction_error__{spec.column}"] = prediction_error
-        weighted_prediction_error += spec.weight * prediction_error
+        if score_spec is not None:
+            weighted_prediction_error += score_spec.weight * prediction_error
 
         observed_col = f"observed__{spec.column}"
         if observed_col in result:
             observed = pd.to_numeric(result[observed_col], errors="coerce")
-            observed_error = _objective_error(observed, spec)
+            observed_error = _objective_error(observed, score_spec or spec)
             result[f"observed_error__{spec.column}"] = observed_error
-            weighted_observed_error += spec.weight * observed_error.fillna(0.0)
+            if score_spec is not None:
+                weighted_observed_error += score_spec.weight * observed_error.fillna(0.0)
 
     result["predicted_score"] = weighted_prediction_error / total_weight
     predicted_passes = pd.concat(
         [
             _objective_pass(result[f"predicted__{spec.column}"], spec)
-            for spec in forward_models.specifications
+            for spec in scoring_specs
         ],
         axis=1,
     )
     result["predicted_meets_all"] = predicted_passes.all(axis=1)
-    if all(f"observed__{spec.column}" in result for spec in forward_models.specifications):
+    if all(f"observed__{spec.column}" in result for spec in scoring_specs):
         result["observed_score"] = weighted_observed_error / total_weight
         observed_passes = pd.concat(
             [
                 _objective_pass(result[f"observed__{spec.column}"], spec)
-                for spec in forward_models.specifications
+                for spec in scoring_specs
             ],
             axis=1,
         )
@@ -408,6 +555,7 @@ def generate_interpolated_candidates(
     partners_per_seed: int = 3,
     fractions: tuple[float, ...] = (0.25, 0.5, 0.75),
     random_state: int = 42,
+    scoring_specifications: Sequence[TargetSpecification] | None = None,
 ) -> pd.DataFrame:
     """同一の主PVC・主可塑剤系列で、既存配合を凸結合した仮想候補を生成する。
 
@@ -461,7 +609,11 @@ def generate_interpolated_candidates(
 
     if not records:
         raise ValueError("No compatible parent pairs were found for interpolation.")
-    return add_predictions_and_scores(pd.DataFrame(records), forward_models).sort_values(
+    return add_predictions_and_scores(
+        pd.DataFrame(records),
+        forward_models,
+        scoring_specifications=scoring_specifications,
+    ).sort_values(
         "predicted_score", kind="stable"
     ).reset_index(drop=True)
 
@@ -550,6 +702,100 @@ def add_preference_status(
     return result
 
 
+def _add_role_status(
+    candidates: pd.DataFrame,
+    specifications: Sequence[TargetSpecification],
+    *,
+    role: str,
+    value_prefix: str = "predicted",
+) -> pd.DataFrame:
+    """指定した役割の合否、未達物性、未達件数を候補表へ追加する。"""
+    specs = tuple(specifications)
+    result = candidates.copy()
+    if not specs:
+        result[f"{value_prefix}_meets_{role}"] = True
+        result[f"{value_prefix}_unmet_{role}"] = ""
+        result[f"{value_prefix}_{role}_violation_count"] = 0
+        return result
+
+    pass_columns: list[str] = []
+    for spec in specs:
+        value_col = f"{value_prefix}__{spec.column}"
+        if value_col not in result:
+            raise KeyError(f"{value_col} is required in candidates.")
+        values = pd.to_numeric(result[value_col], errors="coerce")
+        pass_col = f"{value_prefix}_{role}_meets__{spec.column}"
+        margin_col = f"{value_prefix}_{role}_margin__{spec.column}"
+        result[pass_col] = _objective_pass(values, spec).fillna(False)
+        result[margin_col] = _objective_margin(values, spec)
+        pass_columns.append(pass_col)
+
+    result[f"{value_prefix}_meets_{role}"] = result[pass_columns].all(axis=1)
+    result[f"{value_prefix}_{role}_violation_count"] = (~result[pass_columns]).sum(axis=1)
+
+    def unmet(row: pd.Series) -> str:
+        names = [spec.name for spec, column in zip(specs, pass_columns) if not bool(row[column])]
+        return ", ".join(names)
+
+    result[f"{value_prefix}_unmet_{role}"] = result.apply(unmet, axis=1)
+    return result
+
+
+def add_design_brief_status(
+    candidates: pd.DataFrame,
+    brief: DesignBrief,
+    *,
+    value_prefix: str = "predicted",
+) -> pd.DataFrame:
+    """役割別の判定を追加する。監視物性は参考判定であり選定には使わない。"""
+    result = candidates.copy()
+    for role, specifications in (
+        ("objectives", brief.objectives),
+        ("management_targets", brief.management_targets),
+        ("constraints", brief.constraints),
+        ("monitors", brief.monitors),
+    ):
+        result = _add_role_status(
+            result,
+            specifications,
+            role=role,
+            value_prefix=value_prefix,
+        )
+
+    result[f"{value_prefix}_meets_requirements"] = (
+        result[f"{value_prefix}_meets_management_targets"]
+        & result[f"{value_prefix}_meets_constraints"]
+    )
+    result[f"{value_prefix}_requirement_violation_count"] = (
+        result[f"{value_prefix}_management_targets_violation_count"]
+        + result[f"{value_prefix}_constraints_violation_count"]
+    )
+    result[f"{value_prefix}_meets_objectives_and_requirements"] = (
+        result[f"{value_prefix}_meets_objectives"]
+        & result[f"{value_prefix}_meets_requirements"]
+    )
+    return result
+
+
+def add_formulation_material_count(
+    candidates: pd.DataFrame,
+    forward_models: ForwardModelSet,
+) -> pd.DataFrame:
+    """各候補で配合量が0より大きい説明変数の数を暫定材料数として追加する。"""
+    feature_columns = sorted(
+        {
+            column
+            for prepared in forward_models.prepared.values()
+            for column in prepared.feature_columns
+        }
+    )
+    result = candidates.copy()
+    matrix = result.reindex(columns=feature_columns, fill_value=0.0)
+    matrix = matrix.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    result["formulation_material_count"] = matrix.abs().gt(1e-12).sum(axis=1)
+    return result
+
+
 def select_diverse_candidates(
     candidates: pd.DataFrame,
     *,
@@ -564,18 +810,55 @@ def select_diverse_candidates(
     if missing:
         raise KeyError(f"candidates is missing required columns: {sorted(missing)}")
 
-    source = candidates
+    sort_columns: list[str] = []
+    ascending: list[bool] = []
+    if "predicted_meets_requirements" in candidates:
+        sort_columns.append("predicted_meets_requirements")
+        ascending.append(False)
+    if "predicted_requirement_violation_count" in candidates:
+        sort_columns.append("predicted_requirement_violation_count")
+        ascending.append(True)
+    sort_columns.append("design_score")
+    ascending.append(True)
+
+    ranked_all = candidates.sort_values(sort_columns, ascending=ascending, kind="stable").copy()
+    ranked_all["material_series"] = (
+        ranked_all["primary_pvc"] + " | " + ranked_all["primary_plasticizer"]
+    )
+
+    source = ranked_all
     if prefer_pareto and "pareto_optimal" in candidates:
-        pareto = candidates[candidates["pareto_optimal"]].copy()
+        pareto = ranked_all[ranked_all["pareto_optimal"]].copy()
         if not pareto.empty:
-            source = pareto
+            feasible_pareto = pareto
+            if "predicted_meets_requirements" in pareto:
+                feasible_pareto = pareto[pareto["predicted_meets_requirements"]]
+                feasible_all = ranked_all[ranked_all["predicted_meets_requirements"]]
+                if not feasible_pareto.empty:
+                    source = feasible_pareto
+                elif not feasible_all.empty:
+                    source = feasible_all
+                else:
+                    source = pareto
+            else:
+                source = pareto
 
     result = source.copy()
-    result["material_series"] = result["primary_pvc"] + " | " + result["primary_plasticizer"]
-    diverse = result.sort_values("design_score", kind="stable").drop_duplicates("material_series")
+    diverse = result.drop_duplicates("material_series")
     if len(diverse) < top_n:
-        fallback = result.sort_values("design_score", kind="stable")
+        fallback = result
         diverse = pd.concat([diverse, fallback], ignore_index=True).drop_duplicates("row_id")
+
+    # Pareto候補がtop_n未満の場合は、全候補から未選択の材料系列を優先して補う。
+    # 以前はPareto集合内だけで補充していたため、2物性などPareto候補が少ない
+    # 条件では要求件数に達しないことがあった。
+    if len(diverse) < top_n and len(source) < len(ranked_all):
+        selected_series = set(diverse["material_series"])
+        new_series = ranked_all[~ranked_all["material_series"].isin(selected_series)]
+        new_series = new_series.drop_duplicates("material_series")
+        diverse = pd.concat([diverse, new_series], ignore_index=True).drop_duplicates("row_id")
+    if len(diverse) < top_n:
+        diverse = pd.concat([diverse, ranked_all], ignore_index=True).drop_duplicates("row_id")
     return diverse.head(top_n).reset_index(drop=True)
 
 
@@ -719,16 +1002,22 @@ def run_inverse_design_for_brief(
     fractions: tuple[float, ...] = (0.25, 0.5, 0.75),
     top_n: int = 5,
     random_state: int = 42,
+    max_material_count: int | None = None,
+    require_identified_primary_materials: bool = False,
 ) -> InverseDesignResult:
     """材料像から順解析モデル学習、候補生成、Pareto候補選定まで一括実行する。"""
     forward_models = fit_forward_models(
-        brief.preferences,
+        brief.all_specifications,
         dataset_name=dataset_name,
         model_name=model_name,
         n_estimators=n_estimators,
         random_state=random_state,
     )
-    library = build_candidate_library(forward_models, dataset_name=dataset_name)
+    library = build_candidate_library(
+        forward_models,
+        dataset_name=dataset_name,
+        required_observed=brief.required_specifications,
+    )
     seed_ranking = rank_seed_candidates(library, brief.main_goal)
     virtual_candidates = generate_interpolated_candidates(
         library,
@@ -738,15 +1027,31 @@ def run_inverse_design_for_brief(
         partners_per_seed=partners_per_seed,
         fractions=fractions,
         random_state=random_state,
+        scoring_specifications=brief.objectives,
     )
-    scored_candidates = score_design_preferences(virtual_candidates, brief.preferences)
+    scored_candidates = score_design_preferences(virtual_candidates, brief.objectives)
+    scored_candidates = add_design_brief_status(scored_candidates, brief)
+    scored_candidates = add_formulation_material_count(scored_candidates, forward_models)
     pareto_candidates = scored_candidates[scored_candidates["pareto_optimal"]].copy()
+    eligible_candidates = scored_candidates
+    if max_material_count is not None:
+        if max_material_count <= 0:
+            raise ValueError("max_material_count must be positive.")
+        eligible_candidates = eligible_candidates[
+            eligible_candidates["formulation_material_count"].le(max_material_count)
+        ]
+    if require_identified_primary_materials:
+        eligible_candidates = eligible_candidates[
+            ~eligible_candidates["primary_pvc"].str.startswith("(no ")
+            & ~eligible_candidates["primary_plasticizer"].str.startswith("(no ")
+        ]
+    if eligible_candidates.empty:
+        raise ValueError("No candidates remain after applying practical filters.")
     recommended_candidates = select_diverse_candidates(
-        scored_candidates,
+        eligible_candidates,
         top_n=top_n,
         prefer_pareto=True,
     )
-    recommended_candidates = add_preference_status(recommended_candidates, brief.preferences)
     return InverseDesignResult(
         brief=brief,
         forward_models=forward_models,
@@ -784,6 +1089,18 @@ def candidate_summary(
             "pareto_optimal",
             "predicted_meets_preferences",
             "predicted_unmet_preferences",
+            "predicted_meets_objectives",
+            "predicted_unmet_objectives",
+            "predicted_meets_management_targets",
+            "predicted_unmet_management_targets",
+            "predicted_meets_constraints",
+            "predicted_unmet_constraints",
+            "predicted_meets_requirements",
+            "predicted_requirement_violation_count",
+            "predicted_meets_objectives_and_requirements",
+            "predicted_meets_monitors",
+            "predicted_unmet_monitors",
+            "formulation_material_count",
         )
         if column in candidates
     ]

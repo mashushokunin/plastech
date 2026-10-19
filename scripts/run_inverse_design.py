@@ -13,10 +13,11 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "plastec
 
 from plastech.inverse_design import (  # noqa: E402
     DEFAULT_DESIGN_BRIEFS,
+    ROLE_BASED_DESIGN_BRIEFS,
+    brief_specifications_frame,
     candidate_summary,
     parent_formulation_deltas,
     run_inverse_design_for_brief,
-    specifications_frame,
 )
 
 
@@ -25,11 +26,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default="processed_main")
     parser.add_argument("--model", default="lightgbm", choices=["random_forest", "xgboost", "lightgbm"])
     parser.add_argument("--concept", default="all", help="Design concept name, or 'all'.")
+    parser.add_argument(
+        "--design-mode",
+        default="legacy",
+        choices=["legacy", "role_based"],
+        help="Use the legacy all-in-one specification or the role-based specification.",
+    )
     parser.add_argument("--n-estimators", type=int, default=800)
     parser.add_argument("--seed-count", type=int, default=30)
     parser.add_argument("--partners-per-seed", type=int, default=5)
     parser.add_argument("--top-n", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
+    parser.add_argument(
+        "--max-material-count",
+        type=int,
+        help="Optional upper limit for the provisional non-zero material count.",
+    )
+    parser.add_argument(
+        "--require-identified-primary-materials",
+        action="store_true",
+        help="Exclude candidates whose primary PVC or plasticizer cannot be identified.",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -38,13 +55,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def selected_briefs(concept: str):
+def selected_briefs(concept: str, design_mode: str):
+    briefs = ROLE_BASED_DESIGN_BRIEFS if design_mode == "role_based" else DEFAULT_DESIGN_BRIEFS
     if concept == "all":
-        return DEFAULT_DESIGN_BRIEFS.values()
-    if concept not in DEFAULT_DESIGN_BRIEFS:
-        available = ", ".join(DEFAULT_DESIGN_BRIEFS)
+        return briefs.values()
+    if concept not in briefs:
+        available = ", ".join(briefs)
         raise KeyError(f"Unknown concept: {concept}. Available concepts: {available}")
-    return [DEFAULT_DESIGN_BRIEFS[concept]]
+    return [briefs[concept]]
 
 
 def main() -> None:
@@ -52,13 +70,13 @@ def main() -> None:
     if args.output_dir is not None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    for brief in selected_briefs(args.concept):
+    for brief in selected_briefs(args.concept, args.design_mode):
         print("=" * 80)
         print(f"concept: {brief.name}")
         print(f"description: {brief.description}")
         print()
-        print("preferences:")
-        print(specifications_frame(brief.preferences).to_string(index=False))
+        print("property roles:")
+        print(brief_specifications_frame(brief).to_string(index=False))
         print()
 
         result = run_inverse_design_for_brief(
@@ -70,6 +88,8 @@ def main() -> None:
             partners_per_seed=args.partners_per_seed,
             top_n=args.top_n,
             random_state=args.random_state,
+            max_material_count=args.max_material_count,
+            require_identified_primary_materials=args.require_identified_primary_materials,
         )
         print(f"library rows: {len(result.library):,}")
         print(f"virtual candidates: {len(result.virtual_candidates):,}")
@@ -82,6 +102,20 @@ def main() -> None:
             print()
             print("preference status:")
             print(unmet.to_string(index=False))
+        if "predicted_meets_requirements" in result.recommended_candidates:
+            status = result.recommended_candidates[
+                [
+                    "row_id",
+                    "predicted_meets_objectives",
+                    "predicted_meets_requirements",
+                    "predicted_unmet_management_targets",
+                    "predicted_unmet_constraints",
+                    "predicted_unmet_monitors",
+                ]
+            ]
+            print()
+            print("role-based status:")
+            print(status.to_string(index=False))
         print()
 
         if args.output_dir is not None:
