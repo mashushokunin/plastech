@@ -295,56 +295,6 @@ def build() -> None:
         ["6", "基準品、試作数、測定項目、担当、返却日", "実験計画と再学習工程を確定"],
     ]
     story.append(styled_table(decisions, [14 * mm, 82 * mm, 78 * mm]))
-    story.append(Spacer(1, 7 * mm))
-    story.append(paragraph("推奨する進め方", STYLES["h2"]))
-    for text in (
-        "役割分離と『予測は保証ではない』ことを最初に確認する。",
-        "性能・単純処方・監視値のどれを優先するか決める。",
-        "候補レビュー表を使い、原料・加工・コスト・法規・在庫を確認する。",
-        "基準品を含めた初回試作候補を確定する。",
-        "実測結果の返却形式、担当者、日付を決める。",
-    ):
-        story.append(bullet(text))
-    story.append(Spacer(1, 6 * mm))
-    story.append(
-        card(
-            "会議冒頭の30秒説明",
-            "前回から、物性の役割分離、予測誤差、処方制約、3方針の候補選定まで進めました。現在は16件の実務候補があり、3つの判断軸で9候補へ整理しています。本日は必須物性と処方制約を確認し、レビュー表で初回試作を決めてください。予測は試作順位の参考であり、製品合格の保証ではありません。",
-            PALE_GREEN,
-        )
-    )
-
-    story.append(PageBreak())
-    story.append(paragraph("5. 共有物と会議後の更新", STYLES["h1"]))
-    share_data = [
-        ["共有先", "ファイル", "用途"],
-        ["会議参加者全員", "meeting_report_2026-10-20_final.pdf", "説明・意思決定の本体"],
-        ["司会・記録担当", "candidate_review_sheet.csv", "採否と除外理由の記録"],
-    ]
-    story.append(styled_table(share_data, [35 * mm, 77 * mm, 62 * mm]))
-    story.append(Spacer(1, 7 * mm))
-    story.append(paragraph("会議後の更新手順", STYLES["h2"]))
-    for text in (
-        "レビュー表へ企業側判断、除外理由、加工性、コスト、法規・在庫、試作優先度を記録する。",
-        "合意した材料数、総配合量、禁止原料を制約JSONへ反映する。",
-        "再解析し、3方針の候補を更新する。",
-        "試作結果が得られたら予測値との差を確認し、誤差参照を更新する。",
-    ):
-        story.append(bullet(text))
-    story.append(Spacer(1, 7 * mm))
-    story.append(paragraph("共有しない旧版", STYLES["h2"]))
-    story.append(paragraph("progress_report_2026-10-20.pdf と meeting_handoff_2026-10-20.pdf は今回の予測誤差・処方制約・3方針選定を反映する前の版である。最終版と混在させず、原則共有しない。", STYLES["body"]))
-    story.append(Spacer(1, 7 * mm))
-    story.append(
-        card(
-            "到達点",
-            "AIが最適配合を決定したのではなく、用途価値・必要条件・監視項目・予測誤差・処方制約を分けて、試作候補を説明可能な形で絞り、会議の判断を次の再解析へ戻せるようになった。",
-            PALE_BLUE,
-        )
-    )
-    story.append(Spacer(1, 12 * mm))
-    story.append(paragraph("再現条件", STYLES["h2"]))
-    story.append(paragraph("データ: processed_main（SHA-256: 1c18e064db2a066c71e23df803a7a69c29219a2583bded273d6ea260005bd60b） / モデル: LightGBM / 木: 800 / 乱数: 42 / 誤差: 5-fold OOF p90絶対誤差", STYLES["small"]))
     doc.build(story)
 
 
