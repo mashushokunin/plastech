@@ -75,6 +75,19 @@ df = read_dataset("raw_input")
 python3 scripts/analyze_role_based_design.py
 ```
 
+この再解析では、`config/inverse_design_constraints.example.json` の処方制約と
+`config/prediction_error_reference.json` のOOF p90予測誤差を読み込み、次を出力する。
+
+- `experiment_candidates_by_profile.csv`: 性能重視・単純処方重視・監視値重視の各5候補
+- `candidate_review_sheet.csv`: 会議後の採否、除外理由、加工・コスト・法規在庫確認欄
+
+制約ファイルを複製・編集した場合は、`--constraints-config` で指定する。
+
+```bash
+python3 scripts/analyze_role_based_design.py \
+  --constraints-config config/inverse_design_constraints.example.json
+```
+
 柔軟・低温用途について、役割分離、暫定10材料以下、主PVC・主可塑剤を特定可能という条件で候補を出す。
 
 ```bash
