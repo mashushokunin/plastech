@@ -4,3 +4,8 @@ matplotlib
 xgboost
 lightgbm
 shap
+reportlab
+pdfplumber
+pypdf
+pypdfium2
+websocket-client
