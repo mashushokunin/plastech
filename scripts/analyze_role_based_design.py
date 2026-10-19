@@ -395,10 +395,30 @@ def candidate_review_sheet(experiment_slate: pd.DataFrame) -> pd.DataFrame:
     """会議中・会議後に追記できるレビュー列を備えた候補表を作る。"""
     if experiment_slate.empty:
         return experiment_slate.copy()
+    membership_rows = []
+    for row_id, group in experiment_slate.groupby("row_id", sort=False):
+        membership_rows.append(
+            {
+                "row_id": row_id,
+                "selection_profiles": " / ".join(group["selection_profile"]),
+                "profile_ranks": " / ".join(
+                    f"{profile}:{int(rank)}位"
+                    for profile, rank in zip(
+                        group["selection_profile"], group["profile_rank"]
+                    )
+                ),
+                "selection_reasons": " / ".join(group["selection_reason"]),
+            }
+        )
+    memberships = pd.DataFrame(membership_rows)
+    review_candidates = experiment_slate.drop_duplicates("row_id").drop(
+        columns=["selection_profile", "profile_rank", "selection_reason"]
+    )
+    review_candidates = memberships.merge(review_candidates, on="row_id", how="left")
     identity = [
-        "selection_profile",
-        "profile_rank",
-        "selection_reason",
+        "selection_profiles",
+        "profile_ranks",
+        "selection_reasons",
         "candidate_label",
         "row_id",
         "parent_a",
@@ -424,8 +444,8 @@ def candidate_review_sheet(experiment_slate: pd.DataFrame) -> pd.DataFrame:
             f"p90_robust_pass__{column}",
         )
     ]
-    result = experiment_slate.loc[
-        :, [column for column in identity + prediction if column in experiment_slate]
+    result = review_candidates.loc[
+        :, [column for column in identity + prediction if column in review_candidates]
     ].copy()
     result.insert(0, "review_status", "未確認")
     for column in (
