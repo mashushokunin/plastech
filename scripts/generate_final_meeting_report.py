@@ -150,7 +150,7 @@ def build() -> None:
         leftMargin=18 * mm,
         topMargin=17 * mm,
         bottomMargin=18 * mm,
-        title="プラス・テク共同検討 会議共有レポート",
+        title="プラス・テク共同検討 進捗・実施結果報告",
         author="プロジェクトチーム",
     )
     frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="content")
@@ -158,13 +158,13 @@ def build() -> None:
 
     story = []
     story.append(paragraph("プラス・テク共同検討", STYLES["eyebrow"]))
-    story.append(paragraph("会議共有レポート", STYLES["title"]))
+    story.append(paragraph("進捗・実施結果報告", STYLES["title"]))
     story.append(paragraph("柔軟・低温用途の逆解析 | 2026年10月20日会議", STYLES["subtitle"]))
     story.append(Spacer(1, 8 * mm))
     story.append(
         card(
             "結論",
-            "候補選定ロジックを、物性の役割分離、予測誤差、処方制約、3つの選定方針まで実務運用できる形へ拡張した。現在は試作候補を比較して企業側の制約と優先順位を決める段階であり、モデルだけで製品合格を保証する段階ではない。",
+            "前回から、物性の役割分離、予測誤差、処方制約、3つの選定方針、会議後のレビュー表まで実装・再解析した。分析結果を出すだけでなく、企業側の条件を反映して再解析し、試作判断へつなげる運用まで整備した。",
             PALE_GREEN,
         )
     )
@@ -197,7 +197,42 @@ def build() -> None:
     )
 
     story.append(PageBreak())
-    story.append(paragraph("1. 物性の役割と予測誤差", STYLES["h1"]))
+    story.append(paragraph("1. 前回から実施した作業と成果", STYLES["h1"]))
+    story.append(paragraph("前回課題をそのままにせず、分析設計・実装・再解析・会議運用の4段階を進めた。以下が今回の作業と、確認できた結果である。", STYLES["body"]))
+    story.append(Spacer(1, 4 * mm))
+    progress_data = [
+        ["領域", "前回の状態", "今回実施したこと", "結果"],
+        ["物性設計", "4物性を同じスコア・合否に使用", "最適化・管理・制約・監視へ分離", "目的・必要条件通過85件"],
+        ["最適化", "-41℃以下を同点扱い", "脆化温度を低い方向へ最小化", "改善方向を順位へ反映"],
+        ["処方制約", "材料数を個別確認", "JSONで材料数・総量・禁止原料等を設定", "処方通過63件／物性含む16件"],
+        ["予測誤差", "平均誤差を説明のみ", "候補別p90上下限・保守判定を追加", "全6物性保守通過0件を明示"],
+        ["候補選定", "1種類の上位候補", "性能・単純処方・監視値の3方針化", "各5件／重複除外後9候補"],
+        ["会議運用", "統一した採否記録なし", "候補レビュー表を作成", "採否・除外理由等を記録可能"],
+        ["品質確認", "自動テスト8件", "制約・誤差判定テストを追加", "12件すべて通過"],
+    ]
+    story.append(styled_table(progress_data, [24 * mm, 50 * mm, 62 * mm, 38 * mm], font_size=7.0))
+    story.append(Spacer(1, 6 * mm))
+    story.append(paragraph("作成した仕組みと成果物", STYLES["h2"]))
+    artifact_data = [
+        ["区分", "内容", "実務上の価値"],
+        ["分析ロジック", "物性役割分離・最小化・多様性を考慮した選定", "候補選定理由を説明できる"],
+        ["制約エンジン", "材料数・総配合量・主材料・禁止原料", "企業側条件を設定変更だけで反映"],
+        ["不確実性", "物性別p90予測幅・保守判定", "予測の過信を防ぎ実測要否を明示"],
+        ["会議運用", "3方針候補と9候補のレビュー表", "会議の判断を次の解析へ戻せる"],
+        ["再現性", "設定JSON・解析スクリプト・12テスト", "同じ条件で再実行・検証できる"],
+    ]
+    story.append(styled_table(artifact_data, [31 * mm, 78 * mm, 65 * mm], font_size=7.2))
+    story.append(Spacer(1, 6 * mm))
+    story.append(
+        card(
+            "今回の到達点",
+            "分析結果を提示するだけでなく、企業側の条件を受け取り、候補を再計算し、採否理由と試作結果を次の改善へ戻す一連の流れを構築した。",
+            PALE_GREEN,
+        )
+    )
+
+    story.append(PageBreak())
+    story.append(paragraph("2. 物性の役割と予測誤差", STYLES["h1"]))
     role_data = [
         ["役割", "物性", "現在の条件", "p90絶対誤差"],
         ["最適化", "脆化温度", "-41℃以下を参考に低い方向", f'{errors["S13010_130010"]:.2f}℃'],
@@ -230,7 +265,7 @@ def build() -> None:
     story.append(paragraph("制約に違反した候補は削除せず、候補ごとに違反理由を残す。企業側のルール確定後、JSONを変更して同じ解析を再実行できる。", STYLES["body"]))
 
     story.append(PageBreak())
-    story.append(paragraph("2. 3方針の試作候補", STYLES["h1"]))
+    story.append(paragraph("3. 3方針の試作候補", STYLES["h1"]))
     story.append(paragraph("物性の目的・必要条件と現在の処方制約を通過した16件から選定した。数値はすべて予測値である。監視外れは、比重・100%モジュラス・引張強さの参考条件から外れる項目数を示す。", STYLES["body"]))
     story.append(Spacer(1, 4 * mm))
     for profile, note in (
@@ -249,7 +284,7 @@ def build() -> None:
     )
 
     story.append(PageBreak())
-    story.append(paragraph("3. 会議で決めてほしいこと", STYLES["h1"]))
+    story.append(paragraph("4. 会議で決めてほしいこと", STYLES["h1"]))
     decisions = [
         ["優先", "確認事項", "決まるとできること"],
         ["1", "脆化温度を主目的としてよいか", "最適化軸を確定"],
@@ -280,7 +315,7 @@ def build() -> None:
     )
 
     story.append(PageBreak())
-    story.append(paragraph("4. 共有物と会議後の更新", STYLES["h1"]))
+    story.append(paragraph("5. 共有物と会議後の更新", STYLES["h1"]))
     share_data = [
         ["共有先", "ファイル", "用途"],
         ["会議参加者全員", "meeting_report_2026-10-20_final.pdf", "説明・意思決定の本体"],
