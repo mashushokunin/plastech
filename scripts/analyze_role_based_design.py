@@ -32,6 +32,12 @@ from plastech.inverse_design import (  # noqa: E402
     score_design_preferences,
     select_diverse_candidates,
 )
+from plastech.candidate_constraints import (  # noqa: E402
+    CandidateConstraints,
+    add_prediction_intervals,
+    apply_candidate_constraints,
+    load_prediction_errors,
+)
 
 
 PROPERTY_NAMES = {
@@ -68,6 +74,16 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=PROJECT_ROOT / "outputs" / "role_based_design",
+    )
+    parser.add_argument(
+        "--constraints-config",
+        type=Path,
+        default=PROJECT_ROOT / "config" / "inverse_design_constraints.example.json",
+    )
+    parser.add_argument(
+        "--prediction-error-reference",
+        type=Path,
+        default=PROJECT_ROOT / "config" / "prediction_error_reference.json",
     )
     return parser.parse_args()
 
@@ -282,6 +298,179 @@ def material_count_comparison(result: AnalysisResult) -> tuple[pd.DataFrame, pd.
     return pd.DataFrame(rows), practical_shortlist
 
 
+def add_monitor_distance(candidates: pd.DataFrame, brief: DesignBrief) -> pd.DataFrame:
+    """監視物性の目標からの標準化距離を付与する（合否には使わない）。"""
+    result = candidates.copy()
+    distance = pd.Series(0.0, index=result.index)
+    for spec in brief.monitors:
+        values = pd.to_numeric(result[f"predicted__{spec.column}"], errors="coerce")
+        scale = spec.tolerance if spec.tolerance > 0 else 1.0
+        if spec.objective in {"lower_bound", "maximize"}:
+            component = (spec.target - values).clip(lower=0.0) / scale
+        elif spec.objective in {"upper_bound", "minimize"}:
+            component = (values - spec.target).clip(lower=0.0) / scale
+        else:
+            component = (values - spec.target).abs() / scale
+        distance += component.fillna(np.inf)
+    result["monitor_normalized_distance"] = distance
+    return result
+
+
+def _select_profile(
+    candidates: pd.DataFrame,
+    *,
+    profile: str,
+    sort_columns: list[str],
+    ascending: list[bool],
+    top_n: int = 5,
+) -> pd.DataFrame:
+    ranked = candidates.sort_values(sort_columns, ascending=ascending, kind="stable").copy()
+    ranked["material_series"] = ranked["primary_pvc"] + " | " + ranked["primary_plasticizer"]
+    diverse = ranked.drop_duplicates("material_series")
+    if len(diverse) < top_n:
+        diverse = pd.concat([diverse, ranked], ignore_index=True).drop_duplicates("row_id")
+    selected = diverse.head(top_n).copy()
+    selected.insert(0, "profile_rank", np.arange(1, len(selected) + 1))
+    selected.insert(0, "selection_profile", profile)
+    reasons = {
+        "性能重視": "脆化温度の予測値を最優先",
+        "単純処方重視": "材料数の少なさを最優先",
+        "監視値重視": "監視物性の違反数と目標距離を最優先",
+    }
+    selected.insert(2, "selection_reason", reasons[profile])
+    return selected
+
+
+def select_experiment_profiles(candidates: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
+    """実務制約を通過した候補を、異なる判断軸で別々に選定する。"""
+    eligible = candidates[
+        candidates["predicted_meets_objectives_and_requirements"]
+        & candidates["practical_constraint_pass"]
+    ].copy()
+    if eligible.empty:
+        return pd.DataFrame()
+    profiles = (
+        (
+            "性能重視",
+            ["predicted__S13010_130010", "design_score", "formulation_material_count"],
+            [True, True, True],
+        ),
+        (
+            "単純処方重視",
+            ["formulation_material_count", "predicted__S13010_130010", "design_score"],
+            [True, True, True],
+        ),
+        (
+            "監視値重視",
+            [
+                "predicted_monitors_violation_count",
+                "monitor_normalized_distance",
+                "predicted__S13010_130010",
+            ],
+            [True, True, True],
+        ),
+    )
+    return pd.concat(
+        [
+            _select_profile(
+                eligible,
+                profile=profile,
+                sort_columns=columns,
+                ascending=ascending,
+                top_n=top_n,
+            )
+            for profile, columns, ascending in profiles
+        ],
+        ignore_index=True,
+    )
+
+
+def candidate_review_sheet(experiment_slate: pd.DataFrame) -> pd.DataFrame:
+    """会議中・会議後に追記できるレビュー列を備えた候補表を作る。"""
+    if experiment_slate.empty:
+        return experiment_slate.copy()
+    identity = [
+        "selection_profile",
+        "profile_rank",
+        "selection_reason",
+        "row_id",
+        "parent_a",
+        "parent_b",
+        "parent_a_fraction",
+        "primary_pvc",
+        "primary_plasticizer",
+        "formulation_material_count",
+        "formulation_total_amount",
+        "practical_constraint_pass",
+        "practical_constraint_violations",
+        "p90_robust_pass_all",
+        "predicted_monitors_violation_count",
+        "monitor_normalized_distance",
+    ]
+    prediction = [
+        name
+        for column in PROPERTY_NAMES
+        for name in (
+            f"predicted__{column}",
+            f"p90_lower__{column}",
+            f"p90_upper__{column}",
+            f"p90_robust_pass__{column}",
+        )
+    ]
+    result = experiment_slate.loc[
+        :, [column for column in identity + prediction if column in experiment_slate]
+    ].copy()
+    result.insert(0, "review_status", "未確認")
+    for column in (
+        "company_decision",
+        "exclusion_reason",
+        "processing_notes",
+        "cost_assessment",
+        "legal_inventory_check",
+        "trial_priority",
+        "reviewer",
+        "reviewed_at",
+    ):
+        result[column] = ""
+    return result
+
+
+def readable_experiment_slate(experiment_slate: pd.DataFrame) -> pd.DataFrame:
+    """原料特徴量を除き、会議で比較する列だけに絞った候補一覧を返す。"""
+    columns = [
+        "selection_profile",
+        "profile_rank",
+        "selection_reason",
+        "row_id",
+        "parent_a",
+        "parent_b",
+        "parent_a_fraction",
+        "primary_pvc",
+        "primary_plasticizer",
+        "formulation_material_count",
+        "formulation_total_amount",
+        "practical_constraint_pass",
+        "practical_constraint_violations",
+        "predicted_meets_objectives_and_requirements",
+        "predicted_monitors_violation_count",
+        "monitor_normalized_distance",
+        "p90_robust_pass_all",
+    ]
+    columns.extend(
+        name
+        for property_column in PROPERTY_NAMES
+        for name in (
+            f"predicted__{property_column}",
+            f"p90_lower__{property_column}",
+            f"p90_upper__{property_column}",
+            f"p90_robust_pass__{property_column}",
+        )
+    )
+    return experiment_slate.loc[
+        :, [column for column in columns if column in experiment_slate]
+    ].copy()
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +509,30 @@ def main() -> None:
         partners_per_seed=args.partners_per_seed,
         top_n=args.top_n,
         random_state=args.random_state,
+    )
+
+    constraints = CandidateConstraints.from_json(args.constraints_config)
+    p90_errors = load_prediction_errors(args.prediction_error_reference)
+    constrained_candidates = apply_candidate_constraints(
+        role_based.candidates,
+        role_based.models,
+        constraints,
+        dataset_name=args.dataset,
+    )
+    constrained_candidates = add_prediction_intervals(
+        constrained_candidates,
+        role_based.brief.all_specifications,
+        p90_errors,
+    )
+    constrained_candidates = add_monitor_distance(constrained_candidates, role_based.brief)
+    role_based = AnalysisResult(
+        mode=role_based.mode,
+        brief=role_based.brief,
+        models=role_based.models,
+        library=role_based.library,
+        candidates=constrained_candidates,
+        recommended=role_based.recommended,
+        historical_references=role_based.historical_references,
     )
 
     print("[4/4] writing comparison outputs", flush=True)
@@ -364,6 +577,18 @@ def main() -> None:
         encoding="utf-8-sig",
     )
 
+    experiment_slate = select_experiment_profiles(role_based.candidates, top_n=5)
+    readable_experiment_slate(experiment_slate).to_csv(
+        args.output_dir / "experiment_candidates_by_profile.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    candidate_review_sheet(experiment_slate).to_csv(
+        args.output_dir / "candidate_review_sheet.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
     historical = candidate_summary(
         role_based.historical_references,
         role_based.models,
@@ -397,6 +622,14 @@ def main() -> None:
         "partners_per_seed": args.partners_per_seed,
         "top_n": args.top_n,
         "random_state": args.random_state,
+        "constraints_config": str(args.constraints_config),
+        "prediction_error_reference": str(args.prediction_error_reference),
+        "practical_constraint_pass_candidates": int(
+            role_based.candidates["practical_constraint_pass"].sum()
+        ),
+        "p90_robust_pass_all_candidates": int(
+            role_based.candidates["p90_robust_pass_all"].sum()
+        ),
         "top5_common_candidates": len(overlap),
         "top5_jaccard_overlap": len(overlap) / (10 - len(overlap)),
     }
