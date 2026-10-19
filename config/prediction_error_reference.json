@@ -1,0 +1,15 @@
+{
+  "dataset": "processed_main",
+  "dataset_sha256": "1c18e064db2a066c71e23df803a7a69c29219a2583bded273d6ea260005bd60b",
+  "model": "lightgbm",
+  "method": "5-fold OOF p90 absolute error",
+  "random_state": 42,
+  "errors": {
+    "S03010_030010": 7.8,
+    "S06010_060030": 2.53,
+    "S06020_060030": 3.54,
+    "S06060_060030": 50.8,
+    "S13010_130010": 6.72,
+    "S01010_010010": 0.0471
+  }
+}

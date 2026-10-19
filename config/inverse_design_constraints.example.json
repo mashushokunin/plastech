@@ -1,0 +1,8 @@
+{
+  "max_material_count": 10,
+  "min_total_formulation_amount": null,
+  "max_total_formulation_amount": null,
+  "require_identified_primary_materials": true,
+  "forbidden_columns": [],
+  "forbidden_material_display_names": []
+}
